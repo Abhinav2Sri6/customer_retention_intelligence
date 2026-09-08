@@ -1,0 +1,288 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+---
+title: "Customer Retention Intelligence - Statistical Analysis"
+author: "Abhinav Sriram"
+output: html_document
+---
+
+
+# Overview
+
+This analysis evaluated relationships identified during exploratory data 
+analysis and determines which customer characteristics remain associatd with 
+churn after accounting for other factors.
+
+This analysis focuses on: 
+-Contract type
+-Customer tenure
+-Monthly charges
+-Premium technical support
+-Internet type
+-Customer referrals
+-Demographic characteristics
+
+```{r setup, message=FALSE, warning=FALSE}
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(broom)
+library(here)
+
+
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  message = FALSE, 
+  warning = FALSE
+)
+
+```
+
+#Load Data from SQLite
+
+The analytical data is retrieved directly from the SQLite database created
+during the data-engineering phase.
+
+```{r}
+db_path = here(
+  "database", "customer_retention.db"
+)
+
+con <- dbConnect(SQLite(), db_path)
+```
+
+
+```{r, query-data}
+query <- "
+SELECT
+    c.customer_id,
+    c.age,
+    c.married,
+    c.number_of_dependents,
+    c.number_of_referrals,
+    c.tenure_months,
+    c.churn,
+
+    a.contract,
+    a.payment_method,
+    a.monthly_charge,
+
+    s.internet_service,
+    s.internet_type,
+    s.premium_tech_support
+
+FROM customers AS c
+
+JOIN customer_accounts AS A
+  ON c.customer_id = a.customer_id
+
+JOIN customer_services AS s
+  ON c.customer_id = s.customer_id
+
+WHERE c.churn IS NOT NULL;"
+
+customer_data <- dbGetQuery(con, query)
+
+dbDisconnect(con)
+```
+
+#Initial Inspection
+
+```{r inspect-data}
+class(customer_data)
+dim(customer_data)
+head(customer_data)
+
+```
+The analytical dataset should contain 6,589 customers representing customers
+who either stayed or churned. Newly joined customers are excluded because their
+long-term churn outcome has not yet been observed.
+
+#Data Preparation
+
+Categorical variables are converted to factors before statistical testing.
+
+```{r factors}
+customer_data <- customer_data %>%
+  mutate(churn = factor(churn, levels = c(0,1)), 
+         contract = factor(contract), 
+         premium_tech_support = factor(premium_tech_support), 
+         internet_type = factor(internet_type), 
+         internet_service = factor(internet_service), 
+         married = factor(married), 
+         payment_method = factor(payment_method)
+  )
+```
+
+#Contract Type and Churn
+
+EDA suggested that month-to-month customers experience substantially higher 
+churn than customers with longer-term contracts.
+
+The hypotheses are: 
+**H0:** Contract type and churn are independent.
+**HA:** Contract type and churn are associated.
+
+```{r contract-table}
+contract_table <- table(
+  customer_data$contract, 
+  customer_data$churn
+)
+
+contract_table
+```
+
+```{r contract-chi-square}
+contract_test <- chisq.test(contract_table)
+
+contract_test
+```
+#Premium Technical Support and Churn
+
+EDA showed substantially higher churn among customers without premium technical
+support.
+
+The hypotheses are: 
+**H0:** Premium technical support and churn are independent.
+**HA:** Premium technical support and churn are associated.
+
+```{r support-table}
+support_table <- table(customer_data$premium_tech_support, customer_data$churn)
+
+support_table
+```
+```{r support-chi-square}
+support_test <- chisq.test(support_table)
+
+support_test
+```
+
+#Internet Type and Churn
+
+EDA showed differences in churn rates among fiber optic, cable, DSL, and
+customers without internet service.
+
+The hypotheses are: 
+**H0:** Internet type and churn are independent.
+**HA:** Internet type and churn are associated.
+
+```{r internet-table}
+internet_table <- table(
+  customer_data$internet_type, 
+  customer_data$churn
+)
+
+internet_table
+```
+
+```{r internet-chi-square}
+internet_test <- chisq.test(internet_table)
+internet_test
+```
+#Prepare Data for Logistic Regression
+The invalid negative monthly charges identified during data cleaning were 
+converted to missing values.
+
+For this statistical model, observations with missing monthly charges are 
+excluded
+
+```{r model-data}
+sum(is.na(customer_data$monthly_charge))
+
+model_df <- customer_data %>%
+  filter(!is.na(monthly_charge))
+
+dim(model_df)
+```
+
+Create a numeric binary churn outcome for logistic regression.
+
+```{r numeric-target}
+model_df$churn_numeric <- as.integer(
+  as.character(model_df$churn)
+)
+```
+
+#Multivariable Logistic Regression
+
+A logistic regression model is used to evaluate which variables remain
+associated with churn after accounting for other predictors.
+
+```{r logistic-model}
+churn_model <- glm(churn_numeric ~
+                     contract + 
+                     tenure_months +
+                     monthly_charge + 
+                     premium_tech_support + 
+                     internet_type + 
+                     number_of_referrals +
+                     age + 
+                     number_of_dependents +
+                     married, 
+                   data = model_df, 
+                   family = binomial)
+
+summary(churn_model)
+```
+
+#Odds Ratios
+
+Logistic regression coefficients are exponentiated to produce odds ratios.
+
+An odds ratio: 
+-Greater than 1 indicate higher churn odds.
+-Less than 1 indicated lower churn odds.
+-Near 1 indicates little change in churn odds.
+
+```{r odds-ratios}
+odds_ratios <- tidy(churn_model, exponentiate = TRUE, coef.int = TRUE)
+
+odds_ratios
+```
+
+
+#Statistically Significant Predictors
+
+The following table displays predictors with p-values below 0.05.
+
+```{r}
+significant_predictors <- odds_ratios %>%
+  filter(
+    term != "(Intercept)", 
+    p.value < 0.05
+  ) %>%
+  arrange(p.value)
+
+significant_predictors
+```
+
+#Save Results
+
+The logistic regression results are exported for use in later project stages 
+and documentation.
+
+```{r save-results}
+write.csv(
+  odds_ratios, 
+  here(
+    "data", "processed", "logistic_refression_results.csv"
+  ), 
+  row.names = FALSE
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
